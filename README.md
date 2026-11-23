@@ -65,7 +65,10 @@ Torre con MSI MAG X570 Tomahawk WiFi. El disco raíz es un Samsung 990 PRO 1 TB 
 2. *Corrupción en memoria* detectada por el tree-checker de btrfs: apuntaría a la RAM
    (perfil EXPO/XMP, FCLK) y no al disco. Prueba: memtest86+ y RAM sin perfil.
 
-El volcado de pstore de la próxima caída dirá cuál de los dos mensajes es.
+Al verlos juntos, el mensaje que se recuerda es el primero (contadores `wr`/`corrupt`),
+con la máquina congelada del todo. Eso favorece la hipótesis 1, o al menos un fallo del
+disco o de su enlace, pero es un recuerdo y no un log. El volcado de pstore de la próxima
+caída lo dirá con certeza.
 
 ## Requisitos
 
