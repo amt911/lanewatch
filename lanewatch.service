@@ -1,0 +1,28 @@
+[Unit]
+# Vigila el enlace PCIe del NVMe raiz (Samsung 990 PRO en 01:00.0) y, si el disco cae,
+# provoca un panic para que pstore guarde el dmesg en NVRAM EFI. Ver el encabezado del script.
+# Para que no haga panic:  touch /etc/lanewatch.no-panic
+# Para quitarlo:  systemctl disable --now lanewatch.service
+#                 rm /etc/systemd/system/lanewatch.service /usr/local/bin/lanewatch.sh
+Description=Vigilante del enlace PCIe del NVMe raiz (v2)
+Documentation=file:/usr/local/bin/lanewatch.sh
+# Necesita /var/log montado para el log persistente; systemd-pstore ya ha archivado
+# el volcado de la caida anterior para poder anotarlo al arrancar.
+After=local-fs.target systemd-pstore.service
+Wants=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/lanewatch.sh
+Restart=always
+RestartSec=5
+# setpci, /dev/kmsg y /proc/sysrq-trigger necesitan root.
+User=root
+# Ajustes de hardware (EP, RP, WATCH_MODEL, DEAD_SECS...): ver README.
+EnvironmentFile=-/etc/default/lanewatch
+# Si la swap esta en el disco vigilado, el vigilante no debe depender
+# de leer nada de ella cuando el disco ya no responde.
+MemorySwapMax=0
+
+[Install]
+WantedBy=multi-user.target

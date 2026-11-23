@@ -1,0 +1,12 @@
+#!/bin/bash
+# fake setpci: -s DEV REG[=VAL]; registros en $FAKE_REGS; escritura = RW1C (borra lo escrito)
+dev=$2 spec=$3 reg=${spec%%=*}
+f="$FAKE_REGS/${dev//[:.]/_}_${reg//[+.]/_}"
+w=8; [[ $reg == *.w ]] && w=4
+cur=$(cat "$f" 2>/dev/null); cur=${cur:-$(printf "%0${w}x" 0)}
+if [[ $spec == *=* ]]; then
+  val=${spec#*=}; printf "%0${w}x\n" $(( 16#$cur & ~16#$val )) >"$f"
+  echo "$dev $spec" >>"$FAKE_REGS/writes.log"
+else
+  echo "$cur"
+fi
