@@ -41,12 +41,18 @@ lanewatch ataca las dos cosas:
 Torre con MSI MAG X570 Tomahawk WiFi. El disco raíz es un Samsung 990 PRO 1 TB en M2_1
 (líneas de la CPU, root port `00:01.1`, disco en `01:00.0`), con btrfs sobre LUKS.
 
-- Caídas: 14 sep 2026 (siete en una hora), 21 sep (cuatro, con llama.cpp procesando
-  prompts largos), 17 nov y 23 nov de madrugada. Entre el 21 sep y el 17 nov, ninguna.
-- En septiembre el enlace entrenó dos veces a **Gen4 x1** en vez de x4.
-- Desde entonces entrena a x4, pero el **carril 1** da LaneErr en caliente en todos los
-  arranques, y desde el ~19 nov aparecen errores AER corregibles **Replay Timer Timeout**
-  (el enlace tiene que retransmitir).
+- Del 1 jul al 21 sep 2026 (todo el journal disponible) el disco entrenó a **Gen4 x1** en
+  todos los arranques, teniendo x4. En esa época, ~21 arranques terminaron sin apagado:
+  2 jul, 19 jul, 5 ago (tres), 11–12 ago, 19 ago, 5 sep, 14 sep (seis en una hora) y
+  21 sep (cuatro, con llama.cpp procesando prompts largos).
+- El 21–22 sep se cambió la BIOS (1.H0 → 1.K4) y desde entonces entrena a x4. Desde ese
+  día, solo dos caídas: 17 nov y 23 nov de madrugada.
+- Aun a x4, el **carril 1** da LaneErr en caliente en todos los arranques, y desde el
+  ~19 nov aparecen errores AER corregibles **Replay Timer Timeout** (el enlace tiene que
+  retransmitir).
+- El 14 sep se intentó limitar a Gen3 desde la BIOS, pero el ajuste se aplicó a la ranura
+  de la **gráfica** (PCI_E1, `2d:00.0` a 8 GT/s). El disco siguió a Gen4 x1 y cayó diez
+  minutos después: **la prueba de Gen3 en el disco nunca se ha hecho**.
 - El ahorro de energía del enlace (ASPM L1) está apagado en ese enlace.
 
 - En la última caída se vio en pantalla un error de btrfs con "corrupt" y "escritura",
@@ -61,7 +67,10 @@ Torre con MSI MAG X570 Tomahawk WiFi. El disco raíz es un Samsung 990 PRO 1 TB 
 
 1. *Enlace PCIe Gen4 al límite* entre ranura y disco: encaja con los LaneErr, los Replay
    Timeout y los arranques a x1. Prueba: comparar la tasa de errores en Gen4 con la de
-   M2_1 forzada a Gen3 en la BIOS. Si no cambia, mover el disco de ranura.
+   M2_1 forzada a Gen3 en la BIOS. Si no cambia, mover el disco de ranura. Tras cambiar la
+   BIOS, comprueba que el ajuste llegó **al disco** y no a otra ranura:
+   `cat /sys/bus/pci/devices/0000:01:00.0/current_link_speed` debe decir `8.0 GT/s PCIe`,
+   y lanewatch anotará `LnkSta=1043` en `ENTRENAMIENTO`.
 2. *Corrupción en memoria* detectada por el tree-checker de btrfs: apuntaría a la RAM
    (perfil EXPO/XMP, FCLK) y no al disco. Prueba: memtest86+ y RAM sin perfil.
 
