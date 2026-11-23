@@ -26,11 +26,19 @@
 #     entre arranques y v1 media el disco equivocado la mitad de las veces.
 #   - Fecha completa en cada linea persistida; temperatura y estado del controlador en
 #     cada muestra; SMART, APST y estado de pstore al arrancar; latido cada hora.
+#
+# v2.1 (23 nov 2026): segundo disparador, la raiz en SOLO LECTURA durante RO_SECS. En
+#   la ultima caida se vio en pantalla un error de btrfs ("corrupt" / escritura). btrfs
+#   pasa la raiz a solo lectura tanto si el disco se cae (errores de E/S) como si su
+#   tree-checker detecta metadatos corruptos en RAM antes de escribirlos; en el segundo
+#   caso el controlador sigue "live" y el primer disparador no saltaria nunca.
 
 RP=${RP:-00:01.1}       # root port (lado CPU) - el que registra LaneErr
 EP=${EP:-01:00.0}       # endpoint (el disco)
 IV=${IV:-5}             # segundos entre muestras
 DEAD_SECS=${DEAD_SECS:-120}   # tiempo seguido sin "live" para darlo por caido
+RO_SECS=${RO_SECS:-15}        # tiempo con la raiz en solo lectura (deja terminar al kernel)
+MOUNTS=${MOUNTS:-/proc/self/mounts}
 TRACE_MAX=${TRACE_MAX:-720}   # muestras por fichero de traza (1 h a 5 s) y periodo del latido
 
 LIVE=${LIVE:-/dev/shm/lanewatch.log}          # detalle, se pierde al reiniciar
@@ -106,24 +114,48 @@ TEMP_FILE=""
 for t in "$PCIDEV"/nvme/"$CTRL"/hwmon*/temp1_input; do [ -r "$t" ] && TEMP_FILE=$t; done
 
 dump_final() {                          # solo builtins: el disco puede no estar
+  # Corto a proposito (12 muestras): pstore guarda solo el FINAL del dmesg y lo que
+  # importa son los mensajes de btrfs/nvme que el kernel ha escrito justo antes.
   local -a t=()
   local n from i rec=""
-  kmsg 2 "CAIDA: $CTRL ($EP) estado=$1 durante $2 s. Ultimas muestras:"
+  kmsg 2 "CAIDA: $1, desde hace $2 s. Ultimas muestras:"
   mapfile -t t 2>/dev/null <"$TRACE.1"
   mapfile -t -O "${#t[@]}" t 2>/dev/null <"$TRACE"
   n=${#t[@]}
-  from=$((n > 24 ? n - 24 : 0))
+  from=$((n > 12 ? n - 12 : 0))
   for ((i = from; i < n; i++)); do
     rec+="${t[i]} | "
     if (((i - from) % 4 == 3 || i == n - 1)); then kmsg 2 "$rec"; rec=""; fi
   done
 }
 
+root_mode() {                           # RMODE = rw | ro | ? (solo builtins)
+  local dev mp fs opts rest
+  RMODE="?"
+  while read -r dev mp fs opts rest; do
+    [ "$mp" = / ] && RMODE=${opts%%,*}  # la ultima linea de "/" es la que manda
+  done 2>/dev/null <"$MOUNTS"
+}
+
+fire() {                                # $1 motivo, $2 segundos
+  local backend=""
+  dump_final "$1" "$2"
+  read -r backend 2>/dev/null <"$PSTORE_BACKEND"
+  if [ -e "$NOPANIC" ]; then
+    kmsg 2 "$NOPANIC existe: sin panic. Este volcado solo esta en RAM (dmesg)."
+  else
+    kmsg 0 "panic provocado por lanewatch para que pstore (backend=${backend:-?}) guarde este dmesg en NVRAM EFI"
+    printf c 2>/dev/null >"$SYSRQ"
+  fi
+}
+
 deadman() {
-  local st since=0 now armed=1 backend=""
+  local st since=0 now armed=1 seen_rw=0 ro_since=0 ro_armed=1
   while :; do
-    if ! read -r st 2>/dev/null <"$STATE_FILE"; then st=desaparecido; fi
     now=$EPOCHSECONDS
+
+    # A) el controlador deja de estar "live" (disco fuera del bus o colgado)
+    if ! read -r st 2>/dev/null <"$STATE_FILE"; then st=desaparecido; fi
     if [ "$st" = live ]; then
       [ "$since" -ne 0 ] && kmsg 4 "$CTRL vuelve a live tras $((now - since)) s"
       since=0
@@ -135,16 +167,27 @@ deadman() {
       fi
       if [ "$armed" -eq 1 ] && ((now - since >= DEAD_SECS)); then
         armed=0
-        dump_final "$st" $((now - since))
-        read -r backend 2>/dev/null <"$PSTORE_BACKEND"
-        if [ -e "$NOPANIC" ]; then
-          kmsg 2 "$NOPANIC existe: sin panic. Este volcado solo esta en RAM (dmesg)."
-        else
-          kmsg 0 "panic provocado por lanewatch para que pstore (backend=${backend:-?}) guarde este dmesg en NVRAM EFI"
-          printf c 2>/dev/null >"$SYSRQ"
-        fi
+        fire "controlador $CTRL ($EP) estado=$st" $((now - since))
       fi
     fi
+
+    # B) la raiz pasa a solo lectura (btrfs aborta: E/S o corrupcion detectada).
+    #    Solo despues de haberla visto rw: no confundir con el arranque.
+    root_mode
+    if [ "$RMODE" = rw ]; then
+      seen_rw=1
+      ro_since=0
+    elif [ "$RMODE" = ro ] && [ "$seen_rw" -eq 1 ]; then
+      if [ "$ro_since" -eq 0 ]; then
+        ro_since=$now
+        kmsg 2 "la raiz ha pasado a SOLO LECTURA: en ${RO_SECS} s se vuelca y se da por caida"
+      fi
+      if [ "$ro_armed" -eq 1 ] && ((now - ro_since >= RO_SECS)); then
+        ro_armed=0
+        fire "raiz en solo lectura (controlador $CTRL estado=$st)" $((now - ro_since))
+      fi
+    fi
+
     sleep 1
   done
 }
@@ -195,7 +238,7 @@ note "limpiado -> LaneErrSta=$(r $RP ECAP_SECPCI+08.l) DevSta=$(r $EP CAP_EXP+0a
 #    escribir ahi podria bloquearlo).
 if [ -n "$CTRL" ] && [[ $MODEL == "$WATCH_MODEL"* ]]; then
   deadman >/dev/null 2>&1 &
-  note "vigia de caida ARMADO: $CTRL '$MODEL' en $EP; panic tras ${DEAD_SECS} s sin 'live'$([ -e "$NOPANIC" ] && echo ' (DESACTIVADO por '"$NOPANIC"')')"
+  note "vigia de caida ARMADO: $CTRL '$MODEL' en $EP; panic tras ${DEAD_SECS} s sin 'live' o ${RO_SECS} s con la raiz en solo lectura$([ -e "$NOPANIC" ] && echo ' (DESACTIVADO por '"$NOPANIC"')')"
 else
   note "vigia de caida NO armado: en $EP hay '${MODEL:-nada}' y se esperaba '$WATCH_MODEL'. Revisar EP/RP si se ha cambiado el disco de ranura."
 fi
@@ -216,6 +259,7 @@ while true; do
   temp="?"
   if [ -n "$TEMP_FILE" ] && read -r tm 2>/dev/null <"$TEMP_FILE"; then temp=$((tm / 1000)); fi
   io=$(io_stats)
+  root_mode
 
   if [ -z "$lnk" ] || [ "$lnk" = ffff ]; then
     resp=no-responde                    # disco fuera del bus: no contar basura ffff
@@ -239,12 +283,12 @@ while true; do
     [ -n "$ev" ] && note "EVENTO EN CALIENTE:$ev  lnk=$lnk temp=${temp}C st=$st ($io)  totales lane=$nlane ce=$nce ue=$nue devsta=$nds"
   fi
 
-  printf -v line '%(%m-%d %T)T lane=%s ds=%s ce=%s ue=%s lnk=%s t=%sC st=%s %s n=%d/%d/%d/%d' \
-    -1 "${lane:--}" "${ds:--}" "${ce:--}" "${ue:--}" "${lnk:--}" "$temp" "$st" "$io" \
+  printf -v line '%(%m-%d %T)T lane=%s ds=%s ce=%s ue=%s lnk=%s t=%sC st=%s raiz=%s %s n=%d/%d/%d/%d' \
+    -1 "${lane:--}" "${ds:--}" "${ce:--}" "${ue:--}" "${lnk:--}" "$temp" "$st" "$RMODE" "$io" \
     "$nlane" "$nce" "$nue" "$nds"
   echo "$line" >>"$TRACE"
 
-  cur="lnk=${lnk:--} st=$st resp=$resp"
+  cur="lnk=${lnk:--} st=$st resp=$resp raiz=$RMODE"
   if [ "$cur" != "$prev" ]; then
     note "CAMBIO: $cur  temp=${temp}C ($io)"
     prev="$cur"

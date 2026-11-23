@@ -3,9 +3,9 @@
 # Sin root: usa sysfs y setpci falsos. Sale con 1 si algun escenario no da lo esperado.
 D=$(dirname "$(readlink -f "$0")")
 bash -n "$D/../lanewatch.sh" || exit 1
-declare -A espera=([ok]="" [flap]="" [dead]=c [gone]=c [nopanic]="" [otro-disco]="" [sabotaje]="")
+declare -A espera=([ok]="" [flap]="" [dead]=c [gone]=c [nopanic]="" [otro-disco]="" [ro]=c [ro-arranque]="" [sabotaje]="")
 O=$(mktemp -d)
-for sc in ok flap dead gone nopanic otro-disco; do "$D/escenario.sh" "$sc" >"$O/$sc" 2>&1 & done
+for sc in ok flap dead gone nopanic otro-disco ro ro-arranque; do "$D/escenario.sh" "$sc" >"$O/$sc" 2>&1 & done
 DS=100 "$D/escenario.sh" dead >"$O/sabotaje" 2>&1 &   # el panic NO debe llegar antes de DEAD_SECS
 wait
 fallos=0
