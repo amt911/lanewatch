@@ -45,8 +45,10 @@ Torre con MSI MAG X570 Tomahawk WiFi. El disco raíz es un Samsung 990 PRO 1 TB 
   todos los arranques, teniendo x4. En esa época, ~21 arranques terminaron sin apagado:
   2 jul, 19 jul, 5 ago (tres), 11–12 ago, 19 ago, 5 sep, 14 sep (seis en una hora) y
   21 sep (cuatro, con llama.cpp procesando prompts largos).
-- El 21–22 sep se cambió la BIOS (1.H0 → 1.K4) y desde entonces entrena a x4. Desde ese
-  día, solo dos caídas: 17 nov y 23 nov de madrugada.
+- El 21 sep se **reasentó el disco** y se cambió la BIOS (1.H0 → 1.K4). Desde entonces
+  entrena a x4, y hubo unos dos meses sin caídas hasta la del 23 nov de madrugada (el
+  journal tiene además un arranque cortado el 17 nov).
+- SMART bien, firmware del Samsung en la última versión, test de RAM con XMP sin errores.
 - Aun a x4, el **carril 1** da LaneErr en caliente en todos los arranques, y desde el
   ~19 nov aparecen errores AER corregibles **Replay Timer Timeout** (el enlace tiene que
   retransmitir).
@@ -65,14 +67,16 @@ Torre con MSI MAG X570 Tomahawk WiFi. El disco raíz es un Samsung 990 PRO 1 TB 
 
 **Dos hipótesis, ninguna confirmada:**
 
-1. *Enlace PCIe Gen4 al límite* entre ranura y disco: encaja con los LaneErr, los Replay
-   Timeout y los arranques a x1. Prueba: comparar la tasa de errores en Gen4 con la de
+1. *Contacto o enlace físico* entre la ranura M2_1 y el disco: encaja con los LaneErr, los
+   Replay Timeout, los meses a x1 y con que reasentar el disco lo arreglara durante dos
+   meses (reasentar no arregla una CPU). Queda por separar ranura y disco. Prueba: comparar la tasa de errores en Gen4 con la de
    M2_1 forzada a Gen3 en la BIOS. Si no cambia, mover el disco de ranura. Tras cambiar la
    BIOS, comprueba que el ajuste llegó **al disco** y no a otra ranura:
    `cat /sys/bus/pci/devices/0000:01:00.0/current_link_speed` debe decir `8.0 GT/s PCIe`,
    y lanewatch anotará `LnkSta=1043` en `ENTRENAMIENTO`.
 2. *Corrupción en memoria* detectada por el tree-checker de btrfs: apuntaría a la RAM
-   (perfil EXPO/XMP, FCLK) y no al disco. Prueba: memtest86+ y RAM sin perfil.
+   (perfil EXPO/XMP, FCLK) y no al disco. Poco probable: el test de RAM con XMP dio 0
+   errores y el mensaje recordado es de E/S, no del tree-checker.
 
 Al verlos juntos, el mensaje que se recuerda es el primero (contadores `wr`/`corrupt`),
 con la máquina congelada del todo. Eso favorece la hipótesis 1, o al menos un fallo del
@@ -105,21 +109,22 @@ El instalador:
 
 ## Configuración
 
-Los valores por defecto son los del caso de arriba. Para otro equipo, crea
-`/etc/default/lanewatch`:
+Por defecto vigila **el NVMe que aloja `/`**: lo detecta en cada arranque (`findmnt` →
+`lsblk` → sysfs), junto con su puerto aguas arriba. Si mueves el disco de ranura, lo sigue
+sin tocar nada. Para forzar otra cosa, crea `/etc/default/lanewatch`:
 
 ```sh
 EP=01:00.0                       # disco: cat /sys/class/nvme/nvme*/address
-RP=00:01.1                       # su root port: lspci -tv
-WATCH_MODEL="Samsung SSD 990 PRO"  # prefijo de /sys/class/nvme/nvmeX/model
+RP=00:01.1                       # su puerto aguas arriba (si se omite, se deduce de EP)
+WATCH_MODEL="Samsung SSD 990 PRO"  # con EP fijo: prefijo del modelo esperado
 DEAD_SECS=120                    # segundos sin "live" antes del panic
 RO_SECS=15                       # segundos con la raíz en solo lectura antes del panic
 IV=5                             # segundos entre muestras
 ```
 
-El vigía **solo se arma** si en `EP` hay un controlador cuyo modelo empieza por
-`WATCH_MODEL`. Si cambias el disco de ranura, no hará panic en cada arranque: lo anota y
-se queda sin armar hasta que ajustes `EP`/`RP`.
+Con `EP` fijo y `WATCH_MODEL` puesto, si en `EP` hay otro disco (lo has cambiado de ranura),
+el disparador del controlador no se arma: así no hay panic en cada arranque. El de solo
+lectura funciona siempre.
 
 ## Leer los resultados
 
@@ -166,7 +171,8 @@ comprueba:
 | `dead` | controlador `dead` y enlace `ffff`; volcado `CAIDA` y panic |
 | `gone` | el controlador desaparece de sysfs; panic |
 | `nopanic` | caída con `/etc/lanewatch.no-panic`; volcado sin panic |
-| `otro-disco` | otro modelo en `EP`; el vigía no se arma |
+| `otro-disco` | otro modelo en `EP` y el controlador cae; sin panic (no es el disco vigilado) |
+| `otro-disco-ro` | otro modelo en `EP` y la raíz pasa a solo lectura; panic igualmente |
 | `ro` | la raíz pasa a solo lectura con el disco `live`; panic |
 | `ro-arranque` | la raíz ya está en solo lectura al arrancar el vigía; sin panic |
 | `sabotaje` | caída con `DEAD_SECS=100`: el panic **no** debe llegar antes de tiempo |

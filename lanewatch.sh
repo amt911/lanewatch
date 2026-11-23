@@ -32,9 +32,45 @@
 #   pasa la raiz a solo lectura tanto si el disco se cae (errores de E/S) como si su
 #   tree-checker detecta metadatos corruptos en RAM antes de escribirlos; en el segundo
 #   caso el controlador sigue "live" y el primer disparador no saltaria nunca.
+#
+# v2.2 (23 nov 2026): el disco vigilado se detecta solo (el NVMe que aloja /), asi que
+#   sigue al disco si se cambia de ranura. El disparador de solo lectura funciona siempre,
+#   aunque el de controlador no se arme (antes, si no coincidia el modelo, no arrancaba
+#   ningun disparador).
 
-RP=${RP:-00:01.1}       # root port (lado CPU) - el que registra LaneErr
-EP=${EP:-01:00.0}       # endpoint (el disco)
+detect_root_nvme() {                    # AUTO_EP / AUTO_RP del NVMe que aloja /
+  local src d p
+  src=$(findmnt -no SOURCE / 2>/dev/null)
+  src=${src%%\[*}                       # btrfs: /dev/mapper/x[/@]
+  [ -n "$src" ] || return 1
+  d=$(lsblk -nsro NAME,TYPE "$src" 2>/dev/null | awk '$2 == "disk" { print $1; exit }')
+  [[ $d == nvme* ]] || return 1
+  p=$(readlink -f "/sys/block/$d/device/device") || return 1
+  AUTO_EP=${p##*/}
+  AUTO_EP=${AUTO_EP#0000:}
+  AUTO_RP=${p%/*}
+  AUTO_RP=${AUTO_RP##*/}
+  AUTO_RP=${AUTO_RP#0000:}
+}
+
+# Disco vigilado (EP) y su puerto aguas arriba (RP), que es el que registra LaneErr.
+# Si no se fuerzan en /etc/default/lanewatch, se detectan a partir de /.
+if [ -n "${EP:-}" ]; then
+  ORIGEN="configurado"
+elif detect_root_nvme; then
+  EP=$AUTO_EP
+  RP=${RP:-$AUTO_RP}
+  ORIGEN="detectado: disco de /"
+else
+  EP=01:00.0
+  ORIGEN="por defecto: / no esta en un NVMe"
+fi
+if [ -z "${RP:-}" ]; then
+  p=$(readlink -f "/sys/bus/pci/devices/0000:$EP" 2>/dev/null)
+  RP=${p%/*}
+  RP=${RP##*/}
+  RP=${RP#0000:}
+fi
 IV=${IV:-5}             # segundos entre muestras
 DEAD_SECS=${DEAD_SECS:-120}   # tiempo seguido sin "live" para darlo por caido
 RO_SECS=${RO_SECS:-15}        # tiempo con la raiz en solo lectura (deja terminar al kernel)
@@ -107,9 +143,13 @@ STATE_FILE=$PCIDEV/nvme/$CTRL/state
 BLK=${CTRL}n1
 MODEL=""
 [ -n "$CTRL" ] && read -r MODEL 2>/dev/null <"$PCIDEV/nvme/$CTRL/model"
-# El panic solo se arma si en $EP esta de verdad el disco raiz: si se cambia de
-# ranura, aqui habria otro disco o nada, y se haria panic en cada arranque.
-WATCH_MODEL=${WATCH_MODEL:-Samsung SSD 990 PRO}
+# Con EP fijado a mano, WATCH_MODEL evita vigilar otro disco si se cambia de ranura
+# (se haria panic en cada arranque). Vacio = sin comprobar (EP detectado desde /).
+WATCH_MODEL=${WATCH_MODEL:-}
+NVME_ARMED=0
+if [ -n "$CTRL" ] && { [ -z "$WATCH_MODEL" ] || [[ $MODEL == "$WATCH_MODEL"* ]]; }; then
+  NVME_ARMED=1
+fi
 TEMP_FILE=""
 for t in "$PCIDEV"/nvme/"$CTRL"/hwmon*/temp1_input; do [ -r "$t" ] && TEMP_FILE=$t; done
 
@@ -155,19 +195,22 @@ deadman() {
     now=$EPOCHSECONDS
 
     # A) el controlador deja de estar "live" (disco fuera del bus o colgado)
-    if ! read -r st 2>/dev/null <"$STATE_FILE"; then st=desaparecido; fi
-    if [ "$st" = live ]; then
-      [ "$since" -ne 0 ] && kmsg 4 "$CTRL vuelve a live tras $((now - since)) s"
-      since=0
-      armed=1
-    else
-      if [ "$since" -eq 0 ]; then
-        since=$now
-        kmsg 2 "$CTRL ($EP) estado=$st: si sigue asi ${DEAD_SECS} s se da por caido"
-      fi
-      if [ "$armed" -eq 1 ] && ((now - since >= DEAD_SECS)); then
-        armed=0
-        fire "controlador $CTRL ($EP) estado=$st" $((now - since))
+    st=no-vigilado
+    if [ "$NVME_ARMED" -eq 1 ]; then
+      if ! read -r st 2>/dev/null <"$STATE_FILE"; then st=desaparecido; fi
+      if [ "$st" = live ]; then
+        [ "$since" -ne 0 ] && kmsg 4 "$CTRL vuelve a live tras $((now - since)) s"
+        since=0
+        armed=1
+      else
+        if [ "$since" -eq 0 ]; then
+          since=$now
+          kmsg 2 "$CTRL ($EP) estado=$st: si sigue asi ${DEAD_SECS} s se da por caido"
+        fi
+        if [ "$armed" -eq 1 ] && ((now - since >= DEAD_SECS)); then
+          armed=0
+          fire "controlador $CTRL ($EP) estado=$st" $((now - since))
+        fi
       fi
     fi
 
@@ -236,11 +279,13 @@ note "limpiado -> LaneErrSta=$(r $RP ECAP_SECPCI+08.l) DevSta=$(r $EP CAP_EXP+0a
 
 # 4) Vigia de caida, aislado: sin stdout/stderr (si journald se cuelga con el disco,
 #    escribir ahi podria bloquearlo).
-if [ -n "$CTRL" ] && [[ $MODEL == "$WATCH_MODEL"* ]]; then
-  deadman >/dev/null 2>&1 &
-  note "vigia de caida ARMADO: $CTRL '$MODEL' en $EP; panic tras ${DEAD_SECS} s sin 'live' o ${RO_SECS} s con la raiz en solo lectura$([ -e "$NOPANIC" ] && echo ' (DESACTIVADO por '"$NOPANIC"')')"
+#    El disparador de solo lectura va siempre; el del controlador, si hay disco que vigilar.
+deadman >/dev/null 2>&1 &
+nopanic_txt=$([ -e "$NOPANIC" ] && echo " (panic DESACTIVADO por $NOPANIC)")
+if [ "$NVME_ARMED" -eq 1 ]; then
+  note "vigia de caida ARMADO: $CTRL '$MODEL' en $EP (RP $RP, $ORIGEN); panic tras ${DEAD_SECS} s sin 'live' o ${RO_SECS} s con la raiz en solo lectura$nopanic_txt"
 else
-  note "vigia de caida NO armado: en $EP hay '${MODEL:-nada}' y se esperaba '$WATCH_MODEL'. Revisar EP/RP si se ha cambiado el disco de ranura."
+  note "vigia de caida SOLO de solo lectura: en $EP ($ORIGEN) hay '${MODEL:-nada}'${WATCH_MODEL:+ y se esperaba '$WATCH_MODEL'}; disparador del controlador desactivado. Revisar EP/RP/WATCH_MODEL.$nopanic_txt"
 fi
 
 # 5) dmesg en RAM: el detalle completo, por si la maquina sigue viva tras la caida.
